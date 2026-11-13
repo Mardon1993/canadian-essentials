@@ -3,7 +3,7 @@ import React, { useEffect, useState } from "react";
 import {
   LayoutDashboard, Package, Truck, ShoppingCart,
   Users, ArrowLeftRight, Wallet, Settings,
-  Plus, Search, Bell, Menu, RefreshCw
+  Plus, Search, Bell, Menu, RefreshCw, Pencil
 } from "lucide-react";
 import { supabase } from "./supabase";
 
@@ -21,6 +21,8 @@ const navigation = [
 const money = (value) =>
   Number(value || 0).toLocaleString("en-US") + " UZS";
 
+const inputStyle = { width: "100%", padding: 12 };
+
 export default function App() {
   const [page, setPage] = useState("Dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -36,10 +38,13 @@ export default function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+
   const [showProductForm, setShowProductForm] = useState(false);
+  const [editingProductId, setEditingProductId] = useState(null);
   const [productName, setProductName] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [description, setDescription] = useState("");
+  const [productActive, setProductActive] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -155,41 +160,95 @@ export default function App() {
     if (error) setError(error.message);
   }
 
-  async function addProduct(event) {
+  function resetProductForm() {
+    setEditingProductId(null);
+    setProductName("");
+    setCategoryId("");
+    setDescription("");
+    setProductActive(true);
+    setShowProductForm(false);
+  }
+
+  function startAddProduct() {
+    setError("");
+    resetProductForm();
+    setShowProductForm(true);
+  }
+
+  function startEditProduct(product) {
+    setError("");
+    setEditingProductId(product.id);
+    setProductName(product.name || "");
+    setCategoryId(String(product.category_id ?? ""));
+    setDescription(product.description || "");
+    setProductActive(product.is_active !== false);
+    setShowProductForm(true);
+    setPage("Inventory");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function saveProduct(event) {
     event.preventDefault();
+
+    if (role !== "admin" || saving) return;
 
     const name = productName.trim();
 
-    if (!name || !categoryId || role !== "admin") return;
+    if (!name || !categoryId) {
+      setError("Product name and category are required.");
+      return;
+    }
 
-    if (products.some(
-      (product) => product.name.toLowerCase() === name.toLowerCase()
-    )) {
-      setError("This product already exists. Select it from inventory.");
+    const duplicate = products.some((product) =>
+      product.id !== editingProductId &&
+      product.name.toLowerCase() === name.toLowerCase()
+    );
+
+    if (duplicate) {
+      setError("A product with this name already exists.");
       return;
     }
 
     setSaving(true);
     setError("");
 
-    const { error } = await supabase.from("products").insert({
+    const values = {
       name,
       category_id: Number(categoryId),
       description: description.trim(),
-      is_active: true
-    });
+      is_active: productActive
+    };
 
-    if (error) {
-      setError(error.message);
-    } else {
-      setProductName("");
-      setCategoryId("");
-      setDescription("");
-      setShowProductForm(false);
+    try {
+      if (editingProductId !== null) {
+        const { data, error } = await supabase
+          .from("products")
+          .update(values)
+          .eq("id", editingProductId)
+          .select("id");
+
+        if (error) throw error;
+
+        if (!data || data.length === 0) {
+          throw new Error(
+            "Product was not updated. Check Supabase permissions."
+          );
+        }
+      } else {
+        const { error } = await supabase
+          .from("products")
+          .insert(values);
+
+        if (error) throw error;
+      }
+
+      resetProductForm();
       await loadData();
+    } catch (err) {
+      setError(err.message || "Could not save product.");
+    } finally {
+      setSaving(false);
     }
-
-    setSaving(false);
   }
 
   async function addAgent() {
@@ -226,7 +285,7 @@ export default function App() {
     (agent) => agent.is_active
   ).length;
 
-  const suggestions = productName.trim()
+  const suggestions = productName.trim() && editingProductId === null
     ? products.filter((product) =>
         product.name.toLowerCase().includes(
           productName.toLowerCase()
@@ -239,7 +298,10 @@ export default function App() {
       <div className="app">
         <main className="main">
           <section className="content">
-            <div className="panel" style={{ maxWidth: 450, margin: "70px auto" }}>
+            <div className="panel" style={{
+              maxWidth: 450,
+              margin: "70px auto"
+            }}>
               <h1>Canadian Essentials</h1>
               <p>Sign in to manage your business.</p>
 
@@ -251,7 +313,7 @@ export default function App() {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     required
-                    style={{ width: "100%", padding: 12 }}
+                    style={inputStyle}
                   />
                 </p>
                 <p>
@@ -261,7 +323,7 @@ export default function App() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
-                    style={{ width: "100%", padding: 12 }}
+                    style={inputStyle}
                   />
                 </p>
                 <button className="primary-button" disabled={busy}>
@@ -350,7 +412,7 @@ export default function App() {
             {page === "Inventory" && role === "admin" && (
               <button
                 className="primary-button"
-                onClick={() => setShowProductForm(!showProductForm)}
+                onClick={startAddProduct}
               >
                 <Plus size={18} /> Add Product
               </button>
@@ -398,10 +460,10 @@ export default function App() {
                   <div className="panel">
                     <h2>Connected to Supabase</h2>
                     <p>
-                      Your dashboard now reads inventory, sales,
+                      Your dashboard reads inventory, sales,
                       products and agents from the database.
                       Profit calculations will be activated after
-                      we verify shipping and expense allocation.
+                      shipping and expense allocation are verified.
                     </p>
                   </div>
 
@@ -427,21 +489,25 @@ export default function App() {
                 <>
                   {showProductForm && (
                     <div className="panel">
-                      <h2>Add Product</h2>
+                      <h2>
+                        {editingProductId !== null
+                          ? "Edit Product"
+                          : "Add Product"}
+                      </h2>
                       <p className="muted">
-                        Register a product name and category.
-                        Quantities and purchase prices will be
-                        recorded with shipment batches.
+                        Manage product names, categories and status.
+                        Prices and quantities will be managed later
+                        through shipments and inventory.
                       </p>
 
-                      <form onSubmit={addProduct}>
+                      <form onSubmit={saveProduct}>
                         <p>
                           <input
                             value={productName}
                             onChange={(e) => setProductName(e.target.value)}
                             placeholder="Product name"
                             required
-                            style={{ width: "100%", padding: 12 }}
+                            style={inputStyle}
                           />
                         </p>
 
@@ -466,7 +532,7 @@ export default function App() {
                             value={categoryId}
                             onChange={(e) => setCategoryId(e.target.value)}
                             required
-                            style={{ width: "100%", padding: 12 }}
+                            style={inputStyle}
                           >
                             <option value="">Select category</option>
                             {categories.map((category) => (
@@ -482,17 +548,48 @@ export default function App() {
                             value={description}
                             onChange={(e) => setDescription(e.target.value)}
                             placeholder="Description (optional)"
-                            style={{ width: "100%", padding: 12 }}
+                            style={inputStyle}
                           />
                         </p>
 
-                        <button
-                          className="primary-button"
-                          type="submit"
-                          disabled={saving}
-                        >
-                          {saving ? "Saving..." : "Save Product"}
-                        </button>
+                        <p>
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={productActive}
+                              onChange={(e) =>
+                                setProductActive(e.target.checked)
+                              }
+                            />{" "}
+                            Active product
+                          </label>
+                        </p>
+
+                        <div style={{
+                          display: "flex",
+                          gap: 12,
+                          flexWrap: "wrap"
+                        }}>
+                          <button
+                            className="primary-button"
+                            type="submit"
+                            disabled={saving}
+                          >
+                            {saving
+                              ? "Saving..."
+                              : editingProductId !== null
+                                ? "Save Changes"
+                                : "Save Product"}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={resetProductForm}
+                            disabled={saving}
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       </form>
                     </div>
                   )}
@@ -506,12 +603,15 @@ export default function App() {
                             <th>Product</th>
                             <th>Category</th>
                             <th>Status</th>
+                            <th>Actions</th>
                           </tr>
                         </thead>
                         <tbody>
                           {products.map((product) => (
                             <tr key={product.id}>
-                              <td><strong>{product.name}</strong></td>
+                              <td>
+                                <strong>{product.name}</strong>
+                              </td>
                               <td>
                                 {categories.find(
                                   (category) =>
@@ -519,13 +619,33 @@ export default function App() {
                                 )?.name || "—"}
                               </td>
                               <td>
-                                {product.is_active ? "Active" : "Inactive"}
+                                {product.is_active
+                                  ? "Active"
+                                  : "Inactive"}
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  onClick={() => startEditProduct(product)}
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    padding: "8px 12px",
+                                    cursor: "pointer"
+                                  }}
+                                >
+                                  <Pencil size={15} />
+                                  Edit
+                                </button>
                               </td>
                             </tr>
                           ))}
                           {products.length === 0 && (
                             <tr>
-                              <td colSpan="3">No products added yet.</td>
+                              <td colSpan="4">
+                                No products added yet.
+                              </td>
                             </tr>
                           )}
                         </tbody>
@@ -553,7 +673,9 @@ export default function App() {
                             <td><strong>{agent.name}</strong></td>
                             <td>
                               <span className="status">
-                                {agent.is_active ? "Active" : "Inactive"}
+                                {agent.is_active
+                                  ? "Active"
+                                  : "Inactive"}
                               </span>
                             </td>
                             <td>See profit settings</td>
