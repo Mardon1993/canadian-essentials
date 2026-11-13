@@ -31,6 +31,16 @@ export default function App() {
   const [agents, setAgents] = useState([]);
   const [inventory, setInventory] = useState([]);
   const [sales, setSales] = useState([]);
+  const [parties, setParties] = useState([]);
+  const [partyItems, setPartyItems] = useState([]);
+  const [showPartyForm, setShowPartyForm] = useState(false);
+  const [editingPartyId, setEditingPartyId] = useState(null);
+  const [partyName, setPartyName] = useState("");
+  const [partyDate, setPartyDate] = useState("");
+  const [partyNotes, setPartyNotes] = useState("");
+  const [partyLogistics, setPartyLogistics] = useState("");
+  const [partyLines, setPartyLines] = useState([]);
+  const [partySaving, setPartySaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [user, setUser] = useState(null);
@@ -78,6 +88,8 @@ export default function App() {
       setAgents([]);
       setInventory([]);
       setSales([]);
+      setParties([]);
+      setPartyItems([]);
       setLoading(false);
       return;
     }
@@ -129,7 +141,10 @@ export default function App() {
         supabase.from("categories").select("*").order("name"),
         supabase.from("agents").select("*").order("name"),
         supabase.from("agent_inventory").select("*"),
-        supabase.from("sales").select("*")
+        supabase.from("sales").select("*"),
+        supabase.from("parties").select("*")
+          .order("created_at", { ascending: false }),
+        supabase.from("party_items").select("*")
       ]);
 
       const failure = results.find((result) => result.error);
@@ -141,6 +156,8 @@ export default function App() {
       setAgents(results[2].data || []);
       setInventory(results[3].data || []);
       setSales(results[4].data || []);
+      setParties(results[5].data || []);
+      setPartyItems(results[6].data || []);
     } catch (err) {
       setError(err.message || "Could not load data.");
     } finally {
@@ -323,6 +340,257 @@ export default function App() {
       setSaving(false);
     }
   }
+  
+  function newPartyLine() {
+    return {
+      key: `${Date.now()}-${Math.random()}`,
+      id: null,
+      product_id: "",
+      quantity: "1",
+      cost: "",
+      selling: ""
+    };
+  }
+
+  function resetPartyForm() {
+    setShowPartyForm(false);
+    setEditingPartyId(null);
+    setPartyName("");
+    setPartyDate("");
+    setPartyNotes("");
+    setPartyLogistics("");
+    setPartyLines([]);
+  }
+
+  function startNewParty() {
+    if (role !== "admin") return;
+
+    setError("");
+    setSuccess("");
+    resetPartyForm();
+    setPartyName(`Party ${parties.length + 1}`);
+    setPartyLines([newPartyLine()]);
+    setShowPartyForm(true);
+  }
+
+  function partyHasSales(id) {
+    const ids = new Set(
+      partyItems
+        .filter(x => String(x.party_id) === String(id))
+        .map(x => String(x.id))
+    );
+
+    return sales.some(s =>
+      ids.has(String(s.party_item_id))
+    );
+  }
+
+  function editParty(party) {
+    if (role !== "admin") return;
+
+    setError("");
+    setSuccess("");
+    setEditingPartyId(party.id);
+    setPartyName(party.name || "");
+    setPartyDate(party.shipment_date || "");
+    setPartyNotes(party.notes || "");
+    setPartyLogistics(
+      String(party.logistics_total_uzs ?? "")
+    );
+
+    const lines = partyItems
+      .filter(x => String(x.party_id) === String(party.id))
+      .map(x => ({
+        key: `saved-${x.id}`,
+        id: x.id,
+        product_id: String(x.product_id),
+        quantity: String(x.quantity_purchased),
+        cost: String(x.purchase_cost_uzs ?? ""),
+        selling: String(x.selling_price_uzs ?? "")
+      }));
+
+    setPartyLines(
+      lines.length ? lines : [newPartyLine()]
+    );
+
+    setShowPartyForm(true);
+  }
+
+  function changePartyLine(key, field, value) {
+    setPartyLines(lines =>
+      lines.map(line =>
+        line.key === key
+          ? { ...line, [field]: value }
+          : line
+      )
+    );
+  }
+
+  const partyUnits = partyLines.reduce(
+    (sum, line) => sum + (Number(line.quantity) || 0),
+    0
+  );
+
+  const partyShippingUnit =
+    partyUnits > 0
+      ? (Number(partyLogistics) || 0) / partyUnits
+      : 0;
+
+  const partyLocked =
+    editingPartyId !== null &&
+    partyHasSales(editingPartyId);
+
+  async function saveParty(event) {
+    event.preventDefault();
+
+    if (
+      role !== "admin" ||
+      partySaving ||
+      partyLocked
+    ) return;
+
+    const logistics =
+      partyLogistics === ""
+        ? 0
+        : Number(partyLogistics);
+
+    if (
+      !partyName.trim() ||
+      !Number.isFinite(logistics) ||
+      logistics < 0 ||
+      !partyLines.length
+    ) {
+      setError(
+        "Enter a party name, at least one product, and valid logistics."
+      );
+      return;
+    }
+
+    const seen = new Set();
+
+    for (const line of partyLines) {
+      const qty = Number(line.quantity);
+      const cost = Number(line.cost);
+
+      const selling =
+        line.selling === ""
+          ? null
+          : Number(line.selling);
+
+      if (
+        !line.product_id ||
+        seen.has(line.product_id) ||
+        !Number.isInteger(qty) ||
+        qty <= 0 ||
+        line.cost === "" ||
+        !Number.isFinite(cost) ||
+        cost < 0 ||
+        (
+          selling !== null &&
+          (!Number.isFinite(selling) || selling < 0)
+        )
+      ) {
+        setError(
+          "Select each product once and enter valid quantities and purchase costs."
+        );
+        return;
+      }
+
+      seen.add(line.product_id);
+    }
+
+    setPartySaving(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const values = {
+        name: partyName.trim(),
+        shipment_date: partyDate || null,
+        notes: partyNotes.trim(),
+        logistics_total_uzs: logistics
+      };
+
+      let id = editingPartyId;
+
+      if (id === null) {
+        const { data, error } = await supabase
+          .from("parties")
+          .insert(values)
+          .select("id")
+          .single();
+
+        if (error) throw error;
+
+        id = data.id;
+      } else {
+        const { data, error } = await supabase
+          .from("parties")
+          .update(values)
+          .eq("id", id)
+          .select("id");
+
+        if (error) throw error;
+
+        if (!data?.length) {
+          throw new Error(
+            "Party update was blocked by permissions."
+          );
+        }
+      }
+
+      for (const line of partyLines) {
+        const item = {
+          party_id: id,
+          product_id: Number(line.product_id),
+          quantity_purchased: Number(line.quantity),
+          purchase_cost_uzs: Number(line.cost),
+          selling_price_uzs:
+            line.selling === ""
+              ? null
+              : Number(line.selling),
+          purchase_price_cad: null,
+          exchange_rate: null
+        };
+
+        if (line.id != null) {
+          const { data, error } = await supabase
+            .from("party_items")
+            .update(item)
+            .eq("id", line.id)
+            .select("id");
+
+          if (error) throw error;
+
+          if (!data?.length) {
+            throw new Error(
+              "Could not update a shipment product."
+            );
+          }
+        } else {
+          const { error } = await supabase
+            .from("party_items")
+            .insert(item);
+
+          if (error) throw error;
+        }
+      }
+
+      resetPartyForm();
+      await loadData();
+
+      setSuccess("Shipment saved successfully!");
+    } catch (err) {
+      setError(
+        (err.message || "Could not save shipment.") +
+        " Please review the shipment before retrying; some changes may already be saved."
+      );
+
+      await loadData();
+    } finally {
+      setPartySaving(false);
+    }
+  }
 
   async function addAgent() {
     if (role !== "admin") return;
@@ -346,7 +614,8 @@ export default function App() {
   }
 
   const inventoryCount = inventory.reduce(
-    (sum, item) => sum + Number(item.quantity || 0),
+    (sum, item) =>
+      sum + Number(item.quantity || 0),
     0
   );
 
@@ -359,16 +628,18 @@ export default function App() {
   );
 
   const activeAgents = agents.filter(
-    (agent) => agent.is_active
+    agent => agent.is_active
   ).length;
 
   const suggestions =
     productName.trim() && editingProductId === null
-      ? products.filter((product) =>
-          product.name.toLowerCase().includes(
-            productName.toLowerCase()
+      ? products
+          .filter(product =>
+            product.name.toLowerCase().includes(
+              productName.toLowerCase()
+            )
           )
-        ).slice(0, 6)
+          .slice(0, 6)
       : [];
 
   function discountPercent(product) {
@@ -394,13 +665,10 @@ export default function App() {
       <div className="app">
         <main className="main">
           <section className="content">
-            <div
-              className="panel"
-              style={{
-                maxWidth: 450,
-                margin: "70px auto"
-              }}
-            >
+            <div className="panel" style={{
+              maxWidth: 450,
+              margin: "70px auto"
+            }}>
               <h1>Canadian Essentials</h1>
               <p>Sign in to manage your business.</p>
 
@@ -410,7 +678,7 @@ export default function App() {
                     type="email"
                     placeholder="Email"
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    onChange={e => setEmail(e.target.value)}
                     required
                     style={inputStyle}
                   />
@@ -421,7 +689,7 @@ export default function App() {
                     type="password"
                     placeholder="Password"
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={e => setPassword(e.target.value)}
                     required
                     style={inputStyle}
                   />
@@ -449,13 +717,9 @@ export default function App() {
 
   return (
     <div className="app">
-      <aside
-        className={
-          sidebarOpen
-            ? "sidebar"
-            : "sidebar collapsed"
-        }
-      >
+      <aside className={
+        sidebarOpen ? "sidebar" : "sidebar collapsed"
+      }>
         <div className="brand">
           <div className="brand-icon">CE</div>
 
@@ -472,9 +736,7 @@ export default function App() {
             <button
               key={name}
               className={
-                page === name
-                  ? "nav-item active"
-                  : "nav-item"
+                page === name ? "nav-item active" : "nav-item"
               }
               onClick={() => setPage(name)}
             >
@@ -485,9 +747,7 @@ export default function App() {
         </nav>
 
         <div className="sidebar-footer">
-          {sidebarOpen && (
-            <span>Secure Workspace</span>
-          )}
+          {sidebarOpen && <span>Secure Workspace</span>}
         </div>
       </aside>
 
@@ -495,9 +755,7 @@ export default function App() {
         <header className="topbar">
           <button
             className="icon-button"
-            onClick={() =>
-              setSidebarOpen(!sidebarOpen)
-            }
+            onClick={() => setSidebarOpen(!sidebarOpen)}
           >
             <Menu size={21} />
           </button>
@@ -519,63 +777,57 @@ export default function App() {
 
             <span>{role || "User"}</span>
 
-            <button onClick={logout}>
-              Sign out
-            </button>
+            <button onClick={logout}>Sign out</button>
           </div>
         </header>
 
         <section className="content">
           <div className="page-heading">
             <div>
-              <p className="eyebrow">
-                CANADIAN ESSENTIALS
-              </p>
-
+              <p className="eyebrow">CANADIAN ESSENTIALS</p>
               <h1>{page}</h1>
-
               <p className="subtitle">
-                Manage your inventory, agents and
-                business operations.
+                Manage your inventory, agents and business operations.
               </p>
             </div>
 
-            {page === "Agents" &&
-              role === "admin" && (
-                <button
-                  className="primary-button"
-                  onClick={addAgent}
-                >
-                  <Plus size={18} />
-                  Add Agent
-                </button>
-              )}
+            {page === "Agents" && role === "admin" && (
+              <button
+                className="primary-button"
+                onClick={addAgent}
+              >
+                <Plus size={18} /> Add Agent
+              </button>
+            )}
 
-            {page === "Inventory" &&
-              role === "admin" && (
-                <button
-                  className="primary-button"
-                  onClick={startAddProduct}
-                >
-                  <Plus size={18} />
-                  Add Product
-                </button>
-              )}
+            {page === "Inventory" && role === "admin" && (
+              <button
+                className="primary-button"
+                onClick={startAddProduct}
+              >
+                <Plus size={18} /> Add Product
+              </button>
+            )}
+
+            {page === "Shipments" && role === "admin" && (
+              <button
+                className="primary-button"
+                onClick={startNewParty}
+              >
+                <Plus size={18} /> New Party
+              </button>
+            )}
           </div>
 
           {error && (
             <div className="panel">
-              <p style={{ color: "crimson" }}>
-                {error}
-              </p>
+              <p style={{ color: "crimson" }}>{error}</p>
             </div>
           )}
 
           {success && (
             <div className="panel">
-              <p style={{ color: "green" }}>
-                {success}
-              </p>
+              <p style={{ color: "green" }}>{success}</p>
             </div>
           )}
 
@@ -584,12 +836,10 @@ export default function App() {
           {role !== "admin" && !loading && (
             <div className="panel">
               <h2>Agent Workspace</h2>
-
               <p>
                 Your account is connected.
-                Agent-specific inventory and sales
-                screens will be enabled after their
-                permissions are configured.
+                Agent-specific inventory and sales screens
+                will be enabled after their permissions are configured.
               </p>
             </div>
           )}
@@ -621,10 +871,7 @@ export default function App() {
                         "Live agent records"
                       ]
                     ].map(([title, value, detail]) => (
-                      <div
-                        className="stat-card"
-                        key={title}
-                      >
+                      <div className="stat-card" key={title}>
                         <p>{title}</p>
                         <h2>{value}</h2>
                         <small>{detail}</small>
@@ -634,15 +881,11 @@ export default function App() {
 
                   <div className="panel">
                     <h2>Connected to Supabase</h2>
-
                     <p>
                       Your dashboard reads inventory,
-                      sales, products and agents
-                      from the database.
-
-                      Profit calculations will be
-                      activated after shipping and
-                      expense allocation are verified.
+                      sales, products and agents from the database.
+                      Profit calculations will be activated after
+                      shipping and expense allocation are verified.
                     </p>
                   </div>
 
@@ -650,20 +893,16 @@ export default function App() {
                     <h2>Business modules</h2>
 
                     <div className="module-grid">
-                      {navigation
-                        .slice(1, 7)
-                        .map(({ name, icon: Icon }) => (
-                          <button
-                            className="module"
-                            key={name}
-                            onClick={() =>
-                              setPage(name)
-                            }
-                          >
-                            <Icon size={22} />
-                            <span>{name}</span>
-                          </button>
-                        ))}
+                      {navigation.slice(1, 7).map(({ name, icon: Icon }) => (
+                        <button
+                          className="module"
+                          key={name}
+                          onClick={() => setPage(name)}
+                        >
+                          <Icon size={22} />
+                          <span>{name}</span>
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </>
@@ -686,69 +925,28 @@ export default function App() {
                         will be managed through shipments.
                       </p>
 
-                      <form onSubmit={saveProduct}>
-                        <p>
-                          <label>Product Name</label>
-
-                          <input
-                            value={productName}
-                            onChange={(e) =>
-                              setProductName(
-                                e.target.value
-                              )
-                            }
-                            placeholder="Product name"
-                            required
-                            style={inputStyle}
-                          />
-                        </p>
-
-                        {suggestions.length > 0 && (
-                          <div>
-                            <p>Existing products:</p>
-
-                            {suggestions.map((product) => (
-                              <button
-                                key={product.id}
-                                type="button"
-                                onClick={() =>
-                                  setProductName(
-                                    product.name
-                                  )
-                                }
-                                style={{
-                                  margin: 4,
-                                  padding: 8
-                                }}
-                              >
-                                {product.name}
-                              </button>
-                            ))}
-                          </div>
-                        )}
+                        {suggestions.map((product) => (
+                          <button
+                            key={product.id}
+                            type="button"
+                            onClick={() => setProductName(product.name)}
+                            style={{ margin: 4, padding: 8 }}
+                          >
+                            {product.name}
+                          </button>
+                        ))}
 
                         <p>
                           <label>Category</label>
-
                           <select
                             value={categoryId}
-                            onChange={(e) =>
-                              setCategoryId(
-                                e.target.value
-                              )
-                            }
+                            onChange={e => setCategoryId(e.target.value)}
                             required
                             style={inputStyle}
                           >
-                            <option value="">
-                              Select category
-                            </option>
-
-                            {categories.map((category) => (
-                              <option
-                                key={category.id}
-                                value={category.id}
-                              >
+                            <option value="">Select category</option>
+                            {categories.map(category => (
+                              <option key={category.id} value={category.id}>
                                 {category.name}
                               </option>
                             ))}
@@ -757,62 +955,40 @@ export default function App() {
 
                         <p>
                           <label>Description</label>
-
                           <input
                             value={description}
-                            onChange={(e) =>
-                              setDescription(
-                                e.target.value
-                              )
-                            }
+                            onChange={e => setDescription(e.target.value)}
                             placeholder="Description (optional)"
                             style={inputStyle}
                           />
                         </p>
 
-                        <div
-                          style={{
-                            display: "grid",
-                            gridTemplateColumns:
-                              "repeat(auto-fit, minmax(180px, 1fr))",
-                            gap: 16
-                          }}
-                        >
+                        <div style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                          gap: 16
+                        }}>
                           <p>
-                            <label>
-                              Regular Price (UZS)
-                            </label>
-
+                            <label>Regular Price (UZS)</label>
                             <input
                               type="number"
                               min="0"
                               step="1"
                               value={regularPrice}
-                              onChange={(e) =>
-                                setRegularPrice(
-                                  e.target.value
-                                )
-                              }
+                              onChange={e => setRegularPrice(e.target.value)}
                               placeholder="350000"
                               style={inputStyle}
                             />
                           </p>
 
                           <p>
-                            <label>
-                              Sale Price (UZS)
-                            </label>
-
+                            <label>Sale Price (UZS)</label>
                             <input
                               type="number"
                               min="0"
                               step="1"
                               value={salePrice}
-                              onChange={(e) =>
-                                setSalePrice(
-                                  e.target.value
-                                )
-                              }
+                              onChange={e => setSalePrice(e.target.value)}
                               placeholder="299000 (optional)"
                               style={inputStyle}
                             />
@@ -824,23 +1000,16 @@ export default function App() {
                             <input
                               type="checkbox"
                               checked={productActive}
-                              onChange={(e) =>
-                                setProductActive(
-                                  e.target.checked
-                                )
-                              }
-                            />{" "}
-                            Active product
+                              onChange={e => setProductActive(e.target.checked)}
+                            /> Active product
                           </label>
                         </p>
 
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: 12,
-                            flexWrap: "wrap"
-                          }}
-                        >
+                        <div style={{
+                          display: "flex",
+                          gap: 12,
+                          flexWrap: "wrap"
+                        }}>
                           <button
                             className="primary-button"
                             type="submit"
@@ -867,7 +1036,6 @@ export default function App() {
 
                   <div className="panel">
                     <h2>Product Catalogue</h2>
-
                     <div className="table-wrapper">
                       <table>
                         <thead>
@@ -883,80 +1051,37 @@ export default function App() {
                         </thead>
 
                         <tbody>
-                          {products.map((product) => {
-                            const discount =
-                              discountPercent(product);
+                          {products.map(product => {
+                            const discount = discountPercent(product);
 
                             return (
                               <tr key={product.id}>
-                                <td>
-                                  <strong>
-                                    {product.name}
-                                  </strong>
-                                </td>
-
+                                <td><strong>{product.name}</strong></td>
                                 <td>
                                   {categories.find(
-                                    (category) =>
-                                      category.id ===
-                                      product.category_id
+                                    category => category.id === product.category_id
                                   )?.name || "—"}
                                 </td>
-
                                 <td>
                                   {product.regular_price_uzs == null
                                     ? "—"
-                                    : money(
-                                        product.regular_price_uzs
-                                      )}
+                                    : money(product.regular_price_uzs)}
                                 </td>
-
                                 <td>
                                   {product.sale_price_uzs == null
                                     ? "—"
-                                    : (
-                                      <strong
-                                        style={{
-                                          color: "#16803c"
-                                        }}
-                                      >
-                                        {money(
-                                          product.sale_price_uzs
-                                        )}
-                                      </strong>
-                                    )}
+                                    : money(product.sale_price_uzs)}
                                 </td>
-
                                 <td>
-                                  {discount === null
-                                    ? "—"
-                                    : `${discount}% OFF`}
+                                  {discount === null ? "—" : `${discount}% OFF`}
                                 </td>
-
-                                <td>
-                                  {product.is_active
-                                    ? "Active"
-                                    : "Inactive"}
-                                </td>
-
+                                <td>{product.is_active ? "Active" : "Inactive"}</td>
                                 <td>
                                   <button
                                     type="button"
-                                    onClick={() =>
-                                      startEditProduct(
-                                        product
-                                      )
-                                    }
-                                    style={{
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      gap: 6,
-                                      padding: "8px 12px",
-                                      cursor: "pointer"
-                                    }}
+                                    onClick={() => startEditProduct(product)}
                                   >
-                                    <Pencil size={15} />
-                                    Edit
+                                    <Pencil size={15} /> Edit
                                   </button>
                                 </td>
                               </tr>
@@ -965,8 +1090,320 @@ export default function App() {
 
                           {products.length === 0 && (
                             <tr>
+                              <td colSpan="7">No products added yet.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {page === "Shipments" && (
+                <>
+                  {showPartyForm && (
+                    <div className="panel">
+                      <h2>
+                        {editingPartyId === null
+                          ? "Create Shipment"
+                          : "Edit Shipment"}
+                      </h2>
+
+                      <p className="muted">
+                        Admin only. Purchase cost per unit in UZS,
+                        including tax. Logistics is shared equally
+                        across all units.
+                      </p>
+
+                      {partyLocked ? (
+                        <p style={{ color: "#9a5b00" }}>
+                          This shipment already has sales.
+                          Cost and quantity changes are locked.
+                        </p>
+                      ) : (
+                        <form onSubmit={saveParty}>
+                          <div style={{
+                            display: "grid",
+                            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                            gap: 14
+                          }}>
+                            <p>
+                              <label>Party name</label>
+                              <input
+                                required
+                                style={inputStyle}
+                                value={partyName}
+                                onChange={e => setPartyName(e.target.value)}
+                              />
+                            </p>
+
+                            <p>
+                              <label>Shipment date</label>
+                              <input
+                                type="date"
+                                style={inputStyle}
+                                value={partyDate}
+                                onChange={e => setPartyDate(e.target.value)}
+                              />
+                            </p>
+                          </div>
+
+                          <h3>Products in this party</h3>
+
+                          {partyLines.map(line => {
+                            const qty = Number(line.quantity) || 0;
+                            const cost = Number(line.cost) || 0;
+                            const selected = products.find(
+                              p => String(p.id) === line.product_id
+                            );
+
+                            const selling = line.selling !== ""
+                              ? Number(line.selling)
+                              : Number(
+                                  selected?.sale_price_uzs ??
+                                  selected?.regular_price_uzs ?? 0
+                                );
+
+                            const unitTotal = cost + partyShippingUnit;
+                            const profit = selling - unitTotal;
+
+                            return (
+                              <div
+                                key={line.key}
+                                style={{
+                                  border: "1px solid #dce3e8",
+                                  borderRadius: 10,
+                                  padding: 14,
+                                  marginBottom: 12
+                                }}
+                              >
+                                <div style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "repeat(auto-fit, minmax(155px, 1fr))",
+                                  gap: 12
+                                }}>
+                                  <p>
+                                    <label>Product</label>
+                                    <select
+                                      required
+                                      style={inputStyle}
+                                      value={line.product_id}
+                                      onChange={e => changePartyLine(
+                                        line.key, "product_id", e.target.value
+                                      )}
+                                    >
+                                      <option value="">Select product</option>
+                                      {products.map(p => (
+                                        <option key={p.id} value={p.id}>
+                                          {p.name}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </p>
+
+                                  <p>
+                                    <label>Quantity</label>
+                                    <input
+                                      required
+                                      type="number"
+                                      min="1"
+                                      step="1"
+                                      style={inputStyle}
+                                      value={line.quantity}
+                                      onChange={e => changePartyLine(
+                                        line.key, "quantity", e.target.value
+                                      )}
+                                    />
+                                  </p>
+
+                                  <p>
+                                    <label>Purchase cost/unit (UZS)</label>
+                                    <input
+                                      required
+                                      type="number"
+                                      min="0"
+                                      step="any"
+                                      style={inputStyle}
+                                      value={line.cost}
+                                      onChange={e => changePartyLine(
+                                        line.key, "cost", e.target.value
+                                      )}
+                                    />
+                                  </p>
+
+                                  <p>
+                                    <label>Selling price/unit (UZS)</label>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="any"
+                                      style={inputStyle}
+                                      placeholder={selected
+                                        ? String(selected.sale_price_uzs ??
+                                          selected.regular_price_uzs ?? "")
+                                        : "From catalogue"}
+                                      value={line.selling}
+                                      onChange={e => changePartyLine(
+                                        line.key, "selling", e.target.value
+                                      )}
+                                    />
+                                  </p>
+                                </div>
+
+                                <p className="muted">
+                                  Total cost/unit: <strong>{money(unitTotal)}</strong>
+                                  {" · "}Estimated profit/unit: <strong>{money(profit)}</strong>
+                                  {" · "}Admin 65%: {money(profit * 0.65)}
+                                  {" · "}Agent 35%: {money(profit * 0.35)}
+                                </p>
+
+                                {line.id == null && partyLines.length > 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setPartyLines(
+                                      lines => lines.filter(x => x.key !== line.key)
+                                    )}
+                                  >
+                                    Remove product
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+
+                          <button
+                            type="button"
+                            onClick={() => setPartyLines(
+                              lines => [...lines, newPartyLine()]
+                            )}
+                          >
+                            + Add another product
+                          </button>
+
+                          <hr style={{
+                            margin: "22px 0",
+                            border: 0,
+                            borderTop: "1px solid #dce3e8"
+                          }} />
+
+                          <p>
+                            <label>Total logistics for entire party (UZS)</label>
+                            <input
+                              required
+                              type="number"
+                              min="0"
+                              step="any"
+                              style={inputStyle}
+                              value={partyLogistics}
+                              onChange={e => setPartyLogistics(e.target.value)}
+                              placeholder="Enter after adding all products"
+                            />
+                          </p>
+
+                          <p>
+                            <strong>Total units:</strong> {partyUnits}
+                            {" · "}
+                            <strong>Logistics per unit:</strong>{" "}
+                            {money(partyShippingUnit)}
+                          </p>
+
+                          <p>
+                            <label>Notes (optional)</label>
+                            <input
+                              style={inputStyle}
+                              value={partyNotes}
+                              onChange={e => setPartyNotes(e.target.value)}
+                            />
+                          </p>
+
+                          <div style={{
+                            display: "flex",
+                            gap: 12,
+                            flexWrap: "wrap"
+                          }}>
+                            <button
+                              className="primary-button"
+                              disabled={partySaving}
+                              type="submit"
+                            >
+                              {partySaving ? "Saving..." : "Save Shipment"}
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={partySaving}
+                              onClick={resetPartyForm}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </form>
+                      )}
+
+                      {partyLocked && (
+                        <button onClick={resetPartyForm}>Close</button>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="panel">
+                    <h2>Shipments / Parties</h2>
+
+                    <div className="table-wrapper">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Party</th>
+                            <th>Date</th>
+                            <th>Products</th>
+                            <th>Units</th>
+                            <th>Total logistics</th>
+                            <th>Logistics/unit</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+                          {parties.map(party => {
+                            const lines = partyItems.filter(
+                              x => String(x.party_id) === String(party.id)
+                            );
+
+                            const units = lines.reduce(
+                              (sum, x) =>
+                                sum + Number(x.quantity_purchased || 0),
+                              0
+                            );
+
+                            return (
+                              <tr key={party.id}>
+                                <td><strong>{party.name}</strong></td>
+                                <td>{party.shipment_date || "—"}</td>
+                                <td>{lines.length}</td>
+                                <td>{units}</td>
+                                <td>{money(party.logistics_total_uzs)}</td>
+                                <td>
+                                  {money(
+                                    units
+                                      ? Number(party.logistics_total_uzs || 0) / units
+                                      : 0
+                                  )}
+                                </td>
+                                <td>
+                                  <button onClick={() => editParty(party)}>
+                                    <Pencil size={15} />
+                                    {partyHasSales(party.id) ? "View" : "Edit"}
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+
+                          {parties.length === 0 && (
+                            <tr>
                               <td colSpan="7">
-                                No products added yet.
+                                No shipments yet. Click New Party to begin.
                               </td>
                             </tr>
                           )}
@@ -992,25 +1429,15 @@ export default function App() {
                       </thead>
 
                       <tbody>
-                        {agents.map((agent) => (
+                        {agents.map(agent => (
                           <tr key={agent.id}>
-                            <td>
-                              <strong>
-                                {agent.name}
-                              </strong>
-                            </td>
-
+                            <td><strong>{agent.name}</strong></td>
                             <td>
                               <span className="status">
-                                {agent.is_active
-                                  ? "Active"
-                                  : "Inactive"}
+                                {agent.is_active ? "Active" : "Inactive"}
                               </span>
                             </td>
-
-                            <td>
-                              See profit settings
-                            </td>
+                            <td>See profit settings</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1022,16 +1449,14 @@ export default function App() {
               {![
                 "Dashboard",
                 "Inventory",
+                "Shipments",
                 "Agents"
               ].includes(page) && (
                 <div className="panel">
                   <h2>{page}</h2>
-
                   <p>
-                    This section will be activated
-                    after its database operations
-                    and financial calculations
-                    have been tested.
+                    This section will be activated after its database
+                    operations and financial calculations have been tested.
                   </p>
                 </div>
               )}
@@ -1042,3 +1467,4 @@ export default function App() {
     </div>
   );
 }
+
