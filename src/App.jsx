@@ -44,8 +44,6 @@ export default function App() {
   const [categoryId, setCategoryId] = useState("");
   const [description, setDescription] = useState("");
   const [productActive, setProductActive] = useState(true);
-  const [regularPrice, setRegularPrice] = useState("");
-  const [salePrice, setSalePrice] = useState("");
   const [saving, setSaving] = useState(false);
 
   const [showPartyForm, setShowPartyForm] = useState(false);
@@ -93,3 +91,6 @@ export default function App() {
   }, [user]);
 
   useEffect(() => { if (user && role === "admin") loadData(); }, [user, role]);
+
+  async function loadData() {
+    if (role !== "admin") return;
