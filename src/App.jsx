@@ -45,7 +45,10 @@ export default function App() {
   const [categoryId, setCategoryId] = useState("");
   const [description, setDescription] = useState("");
   const [productActive, setProductActive] = useState(true);
+  const [regularPrice, setRegularPrice] = useState("");
+  const [salePrice, setSalePrice] = useState("");
   const [saving, setSaving] = useState(false);
+  const [success, setSuccess] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -105,7 +108,10 @@ export default function App() {
     }
 
     initialize();
-    return () => { active = false; };
+
+    return () => {
+      active = false;
+    };
   }, [user]);
 
   useEffect(() => {
@@ -127,6 +133,7 @@ export default function App() {
       ]);
 
       const failure = results.find((result) => result.error);
+
       if (failure) throw failure.error;
 
       setProducts(results[0].data || []);
@@ -157,6 +164,7 @@ export default function App() {
 
   async function logout() {
     const { error } = await supabase.auth.signOut();
+
     if (error) setError(error.message);
   }
 
@@ -166,25 +174,50 @@ export default function App() {
     setCategoryId("");
     setDescription("");
     setProductActive(true);
+    setRegularPrice("");
+    setSalePrice("");
     setShowProductForm(false);
   }
 
   function startAddProduct() {
+    if (role !== "admin") return;
+
     setError("");
+    setSuccess("");
     resetProductForm();
     setShowProductForm(true);
   }
 
   function startEditProduct(product) {
+    if (role !== "admin") return;
+
     setError("");
+    setSuccess("");
     setEditingProductId(product.id);
     setProductName(product.name || "");
     setCategoryId(String(product.category_id ?? ""));
     setDescription(product.description || "");
     setProductActive(product.is_active !== false);
+
+    setRegularPrice(
+      product.regular_price_uzs == null
+        ? ""
+        : String(product.regular_price_uzs)
+    );
+
+    setSalePrice(
+      product.sale_price_uzs == null
+        ? ""
+        : String(product.sale_price_uzs)
+    );
+
     setShowProductForm(true);
     setPage("Inventory");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+
+    window.scrollTo({
+      top: 0,
+      behavior: "smooth"
+    });
   }
 
   async function saveProduct(event) {
@@ -209,14 +242,51 @@ export default function App() {
       return;
     }
 
+    const regular =
+      regularPrice.trim() === ""
+        ? null
+        : Number(regularPrice);
+
+    const sale =
+      salePrice.trim() === ""
+        ? null
+        : Number(salePrice);
+
+    if (
+      (regular !== null &&
+        (!Number.isFinite(regular) || regular < 0)) ||
+      (sale !== null &&
+        (!Number.isFinite(sale) || sale < 0))
+    ) {
+      setError("Prices must be valid positive numbers or zero.");
+      return;
+    }
+
+    if (sale !== null && regular === null) {
+      setError("Enter a regular price before adding a sale price.");
+      return;
+    }
+
+    if (
+      sale !== null &&
+      regular !== null &&
+      sale >= regular
+    ) {
+      setError("Sale price must be lower than regular price.");
+      return;
+    }
+
     setSaving(true);
     setError("");
+    setSuccess("");
 
     const values = {
       name,
       category_id: Number(categoryId),
       description: description.trim(),
-      is_active: productActive
+      is_active: productActive,
+      regular_price_uzs: regular,
+      sale_price_uzs: sale
     };
 
     try {
@@ -243,7 +313,10 @@ export default function App() {
       }
 
       resetProductForm();
+
       await loadData();
+
+      setSuccess("Product saved successfully!");
     } catch (err) {
       setError(err.message || "Could not save product.");
     } finally {
@@ -255,12 +328,15 @@ export default function App() {
     if (role !== "admin") return;
 
     const name = prompt("Enter new agent name:");
+
     if (!name?.trim()) return;
 
-    const { error } = await supabase.from("agents").insert({
-      name: name.trim(),
-      is_active: true
-    });
+    const { error } = await supabase
+      .from("agents")
+      .insert({
+        name: name.trim(),
+        is_active: true
+      });
 
     if (error) {
       setError(error.message);
@@ -270,7 +346,8 @@ export default function App() {
   }
 
   const inventoryCount = inventory.reduce(
-    (sum, item) => sum + Number(item.quantity || 0), 0
+    (sum, item) => sum + Number(item.quantity || 0),
+    0
   );
 
   const totalRevenue = sales.reduce(
@@ -285,23 +362,45 @@ export default function App() {
     (agent) => agent.is_active
   ).length;
 
-  const suggestions = productName.trim() && editingProductId === null
-    ? products.filter((product) =>
-        product.name.toLowerCase().includes(
-          productName.toLowerCase()
-        )
-      ).slice(0, 6)
-    : [];
+  const suggestions =
+    productName.trim() && editingProductId === null
+      ? products.filter((product) =>
+          product.name.toLowerCase().includes(
+            productName.toLowerCase()
+          )
+        ).slice(0, 6)
+      : [];
+
+  function discountPercent(product) {
+    const regular = Number(product.regular_price_uzs);
+    const sale = Number(product.sale_price_uzs);
+
+    if (
+      product.regular_price_uzs == null ||
+      product.sale_price_uzs == null ||
+      regular <= 0 ||
+      sale >= regular
+    ) {
+      return null;
+    }
+
+    return Math.round(
+      ((regular - sale) / regular) * 100
+    );
+  }
 
   if (!user) {
     return (
       <div className="app">
         <main className="main">
           <section className="content">
-            <div className="panel" style={{
-              maxWidth: 450,
-              margin: "70px auto"
-            }}>
+            <div
+              className="panel"
+              style={{
+                maxWidth: 450,
+                margin: "70px auto"
+              }}
+            >
               <h1>Canadian Essentials</h1>
               <p>Sign in to manage your business.</p>
 
@@ -316,6 +415,7 @@ export default function App() {
                     style={inputStyle}
                   />
                 </p>
+
                 <p>
                   <input
                     type="password"
@@ -326,12 +426,20 @@ export default function App() {
                     style={inputStyle}
                   />
                 </p>
-                <button className="primary-button" disabled={busy}>
+
+                <button
+                  className="primary-button"
+                  disabled={busy}
+                >
                   {busy ? "Signing in..." : "Sign in"}
                 </button>
               </form>
 
-              {error && <p style={{ color: "crimson" }}>{error}</p>}
+              {error && (
+                <p style={{ color: "crimson" }}>
+                  {error}
+                </p>
+              )}
             </div>
           </section>
         </main>
@@ -341,9 +449,16 @@ export default function App() {
 
   return (
     <div className="app">
-      <aside className={sidebarOpen ? "sidebar" : "sidebar collapsed"}>
+      <aside
+        className={
+          sidebarOpen
+            ? "sidebar"
+            : "sidebar collapsed"
+        }
+      >
         <div className="brand">
           <div className="brand-icon">CE</div>
+
           {sidebarOpen && (
             <div>
               <strong>Canadian Essentials</strong>
@@ -356,7 +471,11 @@ export default function App() {
           {navigation.map(({ name, icon: Icon }) => (
             <button
               key={name}
-              className={page === name ? "nav-item active" : "nav-item"}
+              className={
+                page === name
+                  ? "nav-item active"
+                  : "nav-item"
+              }
               onClick={() => setPage(name)}
             >
               <Icon size={19} />
@@ -366,7 +485,9 @@ export default function App() {
         </nav>
 
         <div className="sidebar-footer">
-          {sidebarOpen && <span>Secure Workspace</span>}
+          {sidebarOpen && (
+            <span>Secure Workspace</span>
+          )}
         </div>
       </aside>
 
@@ -374,54 +495,87 @@ export default function App() {
         <header className="topbar">
           <button
             className="icon-button"
-            onClick={() => setSidebarOpen(!sidebarOpen)}
+            onClick={() =>
+              setSidebarOpen(!sidebarOpen)
+            }
           >
             <Menu size={21} />
           </button>
 
           <div className="topbar-right">
-            <button className="icon-button" onClick={loadData}>
+            <button
+              className="icon-button"
+              onClick={loadData}
+            >
               <RefreshCw size={19} />
             </button>
+
             <Search size={19} />
             <Bell size={19} />
+
             <div className="avatar">
               {user.email?.charAt(0).toUpperCase() || "A"}
             </div>
+
             <span>{role || "User"}</span>
-            <button onClick={logout}>Sign out</button>
+
+            <button onClick={logout}>
+              Sign out
+            </button>
           </div>
         </header>
 
         <section className="content">
           <div className="page-heading">
             <div>
-              <p className="eyebrow">CANADIAN ESSENTIALS</p>
+              <p className="eyebrow">
+                CANADIAN ESSENTIALS
+              </p>
+
               <h1>{page}</h1>
+
               <p className="subtitle">
-                Manage your inventory, agents and business operations.
+                Manage your inventory, agents and
+                business operations.
               </p>
             </div>
 
-            {page === "Agents" && role === "admin" && (
-              <button className="primary-button" onClick={addAgent}>
-                <Plus size={18} /> Add Agent
-              </button>
-            )}
+            {page === "Agents" &&
+              role === "admin" && (
+                <button
+                  className="primary-button"
+                  onClick={addAgent}
+                >
+                  <Plus size={18} />
+                  Add Agent
+                </button>
+              )}
 
-            {page === "Inventory" && role === "admin" && (
-              <button
-                className="primary-button"
-                onClick={startAddProduct}
-              >
-                <Plus size={18} /> Add Product
-              </button>
-            )}
+            {page === "Inventory" &&
+              role === "admin" && (
+                <button
+                  className="primary-button"
+                  onClick={startAddProduct}
+                >
+                  <Plus size={18} />
+                  Add Product
+                </button>
+              )}
           </div>
 
           {error && (
             <div className="panel">
-              <p style={{ color: "crimson" }}>{error}</p>
+              <p style={{ color: "crimson" }}>
+                {error}
+              </p>
+            </div>
+          )}
+
+          {success && (
+            <div className="panel">
+              <p style={{ color: "green" }}>
+                {success}
+              </p>
             </div>
           )}
 
@@ -430,9 +584,11 @@ export default function App() {
           {role !== "admin" && !loading && (
             <div className="panel">
               <h2>Agent Workspace</h2>
+
               <p>
-                Your account is connected. Agent-specific inventory
-                and sales screens will be enabled after their
+                Your account is connected.
+                Agent-specific inventory and sales
+                screens will be enabled after their
                 permissions are configured.
               </p>
             </div>
@@ -444,12 +600,31 @@ export default function App() {
                 <>
                   <div className="stats">
                     {[
-                      ["Total Inventory", inventoryCount, "Units assigned to agents"],
-                      ["Total Sales", money(totalRevenue), "Recorded sales revenue"],
-                      ["Net Profit", "Pending", "Cost allocation verification required"],
-                      ["Active Agents", activeAgents, "Live agent records"]
+                      [
+                        "Total Inventory",
+                        inventoryCount,
+                        "Units assigned to agents"
+                      ],
+                      [
+                        "Total Sales",
+                        money(totalRevenue),
+                        "Recorded sales revenue"
+                      ],
+                      [
+                        "Net Profit",
+                        "Pending",
+                        "Cost allocation verification required"
+                      ],
+                      [
+                        "Active Agents",
+                        activeAgents,
+                        "Live agent records"
+                      ]
                     ].map(([title, value, detail]) => (
-                      <div className="stat-card" key={title}>
+                      <div
+                        className="stat-card"
+                        key={title}
+                      >
                         <p>{title}</p>
                         <h2>{value}</h2>
                         <small>{detail}</small>
@@ -459,27 +634,36 @@ export default function App() {
 
                   <div className="panel">
                     <h2>Connected to Supabase</h2>
+
                     <p>
-                      Your dashboard reads inventory, sales,
-                      products and agents from the database.
-                      Profit calculations will be activated after
-                      shipping and expense allocation are verified.
+                      Your dashboard reads inventory,
+                      sales, products and agents
+                      from the database.
+
+                      Profit calculations will be
+                      activated after shipping and
+                      expense allocation are verified.
                     </p>
                   </div>
 
                   <div className="panel">
                     <h2>Business modules</h2>
+
                     <div className="module-grid">
-                      {navigation.slice(1, 7).map(({ name, icon: Icon }) => (
-                        <button
-                          className="module"
-                          key={name}
-                          onClick={() => setPage(name)}
-                        >
-                          <Icon size={22} />
-                          <span>{name}</span>
-                        </button>
-                      ))}
+                      {navigation
+                        .slice(1, 7)
+                        .map(({ name, icon: Icon }) => (
+                          <button
+                            className="module"
+                            key={name}
+                            onClick={() =>
+                              setPage(name)
+                            }
+                          >
+                            <Icon size={22} />
+                            <span>{name}</span>
+                          </button>
+                        ))}
                     </div>
                   </div>
                 </>
@@ -494,17 +678,25 @@ export default function App() {
                           ? "Edit Product"
                           : "Add Product"}
                       </h2>
+
                       <p className="muted">
-                        Manage product names, categories and status.
-                        Prices and quantities will be managed later
-                        through shipments and inventory.
+                        Manage product information,
+                        regular prices and sale prices.
+                        Purchase costs and quantities
+                        will be managed through shipments.
                       </p>
 
                       <form onSubmit={saveProduct}>
                         <p>
+                          <label>Product Name</label>
+
                           <input
                             value={productName}
-                            onChange={(e) => setProductName(e.target.value)}
+                            onChange={(e) =>
+                              setProductName(
+                                e.target.value
+                              )
+                            }
                             placeholder="Product name"
                             required
                             style={inputStyle}
@@ -514,12 +706,20 @@ export default function App() {
                         {suggestions.length > 0 && (
                           <div>
                             <p>Existing products:</p>
+
                             {suggestions.map((product) => (
                               <button
                                 key={product.id}
                                 type="button"
-                                onClick={() => setProductName(product.name)}
-                                style={{ margin: 4, padding: 8 }}
+                                onClick={() =>
+                                  setProductName(
+                                    product.name
+                                  )
+                                }
+                                style={{
+                                  margin: 4,
+                                  padding: 8
+                                }}
                               >
                                 {product.name}
                               </button>
@@ -528,15 +728,27 @@ export default function App() {
                         )}
 
                         <p>
+                          <label>Category</label>
+
                           <select
                             value={categoryId}
-                            onChange={(e) => setCategoryId(e.target.value)}
+                            onChange={(e) =>
+                              setCategoryId(
+                                e.target.value
+                              )
+                            }
                             required
                             style={inputStyle}
                           >
-                            <option value="">Select category</option>
+                            <option value="">
+                              Select category
+                            </option>
+
                             {categories.map((category) => (
-                              <option key={category.id} value={category.id}>
+                              <option
+                                key={category.id}
+                                value={category.id}
+                              >
                                 {category.name}
                               </option>
                             ))}
@@ -544,13 +756,68 @@ export default function App() {
                         </p>
 
                         <p>
+                          <label>Description</label>
+
                           <input
                             value={description}
-                            onChange={(e) => setDescription(e.target.value)}
+                            onChange={(e) =>
+                              setDescription(
+                                e.target.value
+                              )
+                            }
                             placeholder="Description (optional)"
                             style={inputStyle}
                           />
                         </p>
+
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns:
+                              "repeat(auto-fit, minmax(180px, 1fr))",
+                            gap: 16
+                          }}
+                        >
+                          <p>
+                            <label>
+                              Regular Price (UZS)
+                            </label>
+
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={regularPrice}
+                              onChange={(e) =>
+                                setRegularPrice(
+                                  e.target.value
+                                )
+                              }
+                              placeholder="350000"
+                              style={inputStyle}
+                            />
+                          </p>
+
+                          <p>
+                            <label>
+                              Sale Price (UZS)
+                            </label>
+
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={salePrice}
+                              onChange={(e) =>
+                                setSalePrice(
+                                  e.target.value
+                                )
+                              }
+                              placeholder="299000 (optional)"
+                              style={inputStyle}
+                            />
+                          </p>
+                        </div>
 
                         <p>
                           <label>
@@ -558,18 +825,22 @@ export default function App() {
                               type="checkbox"
                               checked={productActive}
                               onChange={(e) =>
-                                setProductActive(e.target.checked)
+                                setProductActive(
+                                  e.target.checked
+                                )
                               }
                             />{" "}
                             Active product
                           </label>
                         </p>
 
-                        <div style={{
-                          display: "flex",
-                          gap: 12,
-                          flexWrap: "wrap"
-                        }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: 12,
+                            flexWrap: "wrap"
+                          }}
+                        >
                           <button
                             className="primary-button"
                             type="submit"
@@ -596,54 +867,105 @@ export default function App() {
 
                   <div className="panel">
                     <h2>Product Catalogue</h2>
+
                     <div className="table-wrapper">
                       <table>
                         <thead>
                           <tr>
                             <th>Product</th>
                             <th>Category</th>
+                            <th>Regular Price</th>
+                            <th>Sale Price</th>
+                            <th>Discount</th>
                             <th>Status</th>
                             <th>Actions</th>
                           </tr>
                         </thead>
+
                         <tbody>
-                          {products.map((product) => (
-                            <tr key={product.id}>
-                              <td>
-                                <strong>{product.name}</strong>
-                              </td>
-                              <td>
-                                {categories.find(
-                                  (category) =>
-                                    category.id === product.category_id
-                                )?.name || "—"}
-                              </td>
-                              <td>
-                                {product.is_active
-                                  ? "Active"
-                                  : "Inactive"}
-                              </td>
-                              <td>
-                                <button
-                                  type="button"
-                                  onClick={() => startEditProduct(product)}
-                                  style={{
-                                    display: "inline-flex",
-                                    alignItems: "center",
-                                    gap: 6,
-                                    padding: "8px 12px",
-                                    cursor: "pointer"
-                                  }}
-                                >
-                                  <Pencil size={15} />
-                                  Edit
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
+                          {products.map((product) => {
+                            const discount =
+                              discountPercent(product);
+
+                            return (
+                              <tr key={product.id}>
+                                <td>
+                                  <strong>
+                                    {product.name}
+                                  </strong>
+                                </td>
+
+                                <td>
+                                  {categories.find(
+                                    (category) =>
+                                      category.id ===
+                                      product.category_id
+                                  )?.name || "—"}
+                                </td>
+
+                                <td>
+                                  {product.regular_price_uzs == null
+                                    ? "—"
+                                    : money(
+                                        product.regular_price_uzs
+                                      )}
+                                </td>
+
+                                <td>
+                                  {product.sale_price_uzs == null
+                                    ? "—"
+                                    : (
+                                      <strong
+                                        style={{
+                                          color: "#16803c"
+                                        }}
+                                      >
+                                        {money(
+                                          product.sale_price_uzs
+                                        )}
+                                      </strong>
+                                    )}
+                                </td>
+
+                                <td>
+                                  {discount === null
+                                    ? "—"
+                                    : `${discount}% OFF`}
+                                </td>
+
+                                <td>
+                                  {product.is_active
+                                    ? "Active"
+                                    : "Inactive"}
+                                </td>
+
+                                <td>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      startEditProduct(
+                                        product
+                                      )
+                                    }
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      padding: "8px 12px",
+                                      cursor: "pointer"
+                                    }}
+                                  >
+                                    <Pencil size={15} />
+                                    Edit
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+
                           {products.length === 0 && (
                             <tr>
-                              <td colSpan="4">
+                              <td colSpan="7">
                                 No products added yet.
                               </td>
                             </tr>
@@ -658,6 +980,7 @@ export default function App() {
               {page === "Agents" && (
                 <div className="panel">
                   <h2>Agent Management</h2>
+
                   <div className="table-wrapper">
                     <table>
                       <thead>
@@ -667,10 +990,16 @@ export default function App() {
                           <th>Profit Share</th>
                         </tr>
                       </thead>
+
                       <tbody>
                         {agents.map((agent) => (
                           <tr key={agent.id}>
-                            <td><strong>{agent.name}</strong></td>
+                            <td>
+                              <strong>
+                                {agent.name}
+                              </strong>
+                            </td>
+
                             <td>
                               <span className="status">
                                 {agent.is_active
@@ -678,7 +1007,10 @@ export default function App() {
                                   : "Inactive"}
                               </span>
                             </td>
-                            <td>See profit settings</td>
+
+                            <td>
+                              See profit settings
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -687,12 +1019,18 @@ export default function App() {
                 </div>
               )}
 
-              {!["Dashboard", "Inventory", "Agents"].includes(page) && (
+              {![
+                "Dashboard",
+                "Inventory",
+                "Agents"
+              ].includes(page) && (
                 <div className="panel">
                   <h2>{page}</h2>
+
                   <p>
-                    This section will be activated after its
-                    database operations and financial calculations
+                    This section will be activated
+                    after its database operations
+                    and financial calculations
                     have been tested.
                   </p>
                 </div>
